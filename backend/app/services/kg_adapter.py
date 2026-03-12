@@ -364,12 +364,23 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
                 if not entity_name:
                     continue
 
+                # 确保 entity_type 有效，否则使用默认标签
+                if not entity_type or not entity_type.strip():
+                    entity_label = "Entity"
+                else:
+                    entity_label = entity_type.strip()
+                    # Neo4j 标签不能以数字开头
+                    if entity_label[0].isdigit():
+                        entity_label = f"Type{entity_label}"
+
                 # 创建实体节点并关联到 Group
+                # 实体同时拥有动态标签和 Entity 基类标签，便于查询
                 entity_uuid = str(uuid.uuid4())
-                query = """
-                MERGE (g:Group {name: $group_id})
-                MERGE (e:Entity {name: $name, group_id: $group_id})
-                SET e.uuid = $uuid,
+                query = f"""
+                MERGE (g:Group {{name: $group_id}})
+                MERGE (e:`{entity_label}` {{name: $name, group_id: $group_id}})
+                SET e:Entity,
+                    e.uuid = $uuid,
                     e.summary = $summary,
                     e.created_at = datetime(),
                     e.entity_type = $type
