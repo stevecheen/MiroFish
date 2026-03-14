@@ -284,51 +284,54 @@ class OasisProfileGenerator:
     def _search_zep_for_entity(self, entity: EntityNode) -> Dict[str, Any]:
         """
         使用Zep图谱混合搜索功能获取实体相关的丰富信息
-        
+
         Zep没有内置混合搜索接口，需要分别搜索edges和nodes然后合并结果。
         使用并行请求同时搜索，提高效率。
-        
+
         Args:
             entity: 实体节点对象
-            
+
         Returns:
             包含facts, node_summaries, context的字典
         """
         import concurrent.futures
-        
+
         if not self.kg:
             return {"facts": [], "node_summaries": [], "context": ""}
-        
+
         entity_name = entity.name
-        
+
         results = {
             "facts": [],
             "node_summaries": [],
             "context": ""
         }
-        
+
         # 必须有graph_id才能进行搜索
         if not self.graph_id:
             logger.debug(f"跳过Zep检索：未设置graph_id")
             return results
-        
-        comprehensive_query = f"关于{entity_name}的所有信息、活动、事件、关系和背景"
-        
+
+        # 使用实体名称作为查询，而不是复杂的中文描述
+        # Zep Cloud search 对中文支持有限，尝试直接用实体名搜索
+        comprehensive_query = entity_name
+
         def search_edges():
             """搜索边（事实/关系）- 带重试机制"""
             max_retries = 3
             last_exception = None
             delay = 2.0
-            
+
             for attempt in range(max_retries):
                 try:
-                    return self.kg.search(
+                    result = self.kg.search(
                         query=comprehensive_query,
                         graph_id=self.graph_id,
                         limit=30,
                         scope="edges",
                         reranker="rrf"
                     )
+                    return result
                 except Exception as e:
                     last_exception = e
                     if attempt < max_retries - 1:

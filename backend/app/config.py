@@ -31,13 +31,15 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    LLM_MAX_TOKENS = int(os.environ.get('LLM_MAX_TOKENS', '4096'))
 
     # 嵌入模型配置（用于 Graphiti local 模式，可独立配置）
     EMBEDDING_API_KEY = os.environ.get('EMBEDDING_API_KEY')  # 可选，默认使用 LLM_API_KEY
     EMBEDDING_BASE_URL = os.environ.get('EMBEDDING_BASE_URL')  # 可选，默认使用 LLM_BASE_URL
     EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'text-embedding-3-small')
     EMBEDDING_DIM = int(os.environ.get('EMBEDDING_DIM', '1536'))
-    
+    EMBEDDING_BATCH_SIZE = int(os.environ.get('EMBEDDING_BATCH_SIZE', '5'))  # 批处理大小，默认5
+
     # 知识图谱模式配置
     # cloud: 使用 Zep Cloud (默认)
     # local: 使用 Graphiti + Neo4j (本地部署)

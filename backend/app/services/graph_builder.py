@@ -298,44 +298,59 @@ class GraphBuilderService:
         progress_callback: Optional[Callable] = None
     ) -> List[str]:
         """分批添加文本到图谱，返回所有 episode 的 uuid 列表"""
+        import logging
+        build_logger = logging.getLogger('mirofish.build')
+
         episode_uuids = []
         total_chunks = len(chunks)
-        
+
+        build_logger.debug(f"[add_text_batches] 开始添加 {total_chunks} 个块，batch_size={batch_size}")
+
         for i in range(0, total_chunks, batch_size):
             batch_chunks = chunks[i:i + batch_size]
             batch_num = i // batch_size + 1
             total_batches = (total_chunks + batch_size - 1) // batch_size
-            
+
             if progress_callback:
                 progress = (i + len(batch_chunks)) / total_chunks
                 progress_callback(
                     f"发送第 {batch_num}/{total_batches} 批数据 ({len(batch_chunks)} 块)...",
                     progress
                 )
-            
+
+            build_logger.debug(f"[add_text_batches] 准备发送批次 {batch_num}/{total_batches}")
+
             # 发送到图谱
             try:
                 # 使用适配器的批量添加方法
+                build_logger.debug(f"[add_text_batches] 调用 kg.add_episodes_batch...")
                 batch_result = self.kg.add_episodes_batch(
                     graph_id=graph_id,
                     texts=batch_chunks
                 )
+                build_logger.debug(f"[add_text_batches] 批次 {batch_num} 发送完成")
 
-                # 收集返回的 episode uuid
+                # 收集返回的 episode uuid（兼容 dict 和对象两种格式）
                 if batch_result and isinstance(batch_result, list):
                     for ep in batch_result:
-                        ep_uuid = getattr(ep, 'uuid_', None) or getattr(ep, 'uuid', None)
+                        if isinstance(ep, dict):
+                            ep_uuid = ep.get('uuid') or ep.get('uuid_')
+                        else:
+                            ep_uuid = getattr(ep, 'uuid_', None) or getattr(ep, 'uuid', None)
                         if ep_uuid:
                             episode_uuids.append(ep_uuid)
+                            build_logger.debug(f"[add_text_batches] 收集到 episode uuid: {ep_uuid}")
 
                 # 避免请求过快
                 time.sleep(1)
 
             except Exception as e:
+                build_logger.error(f"[add_text_batches] 批次 {batch_num} 发送失败: {str(e)}")
                 if progress_callback:
                     progress_callback(f"批次 {batch_num} 发送失败: {str(e)}", 0)
                 raise
 
+        build_logger.debug(f"[add_text_batches] 所有批次发送完成，共 {len(episode_uuids)} 个 episode")
         return episode_uuids
     
     def _wait_for_episodes(
@@ -371,7 +386,11 @@ class GraphBuilderService:
             for ep_uuid in list(pending_episodes):
                 try:
                     episode = self.kg.get_episode(ep_uuid)
-                    is_processed = getattr(episode, 'processed', False)
+                    # 兼容 dict 和对象两种格式
+                    if isinstance(episode, dict):
+                        is_processed = episode.get('processed', False)
+                    else:
+                        is_processed = getattr(episode, 'processed', False)
 
                     if is_processed:
                         pending_episodes.remove(ep_uuid)

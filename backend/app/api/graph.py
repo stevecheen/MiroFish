@@ -374,7 +374,7 @@ def build_graph():
         def build_task():
             build_logger = get_logger('mirofish.build')
             try:
-                build_logger.info(f"[{task_id}] 开始构建图谱...")
+                build_logger.debug(f"[{task_id}] 开始构建图谱...")
                 task_manager.update_task(
                     task_id, 
                     status=TaskStatus.PROCESSING,
@@ -410,12 +410,15 @@ def build_graph():
                 ProjectManager.save_project(project)
                 
                 # 设置本体
+                build_logger.debug(f"[{task_id}] 准备设置本体...")
                 task_manager.update_task(
                     task_id,
                     message="设置本体定义...",
                     progress=15
                 )
+                build_logger.debug(f"[{task_id}] 开始设置本体...")
                 builder.set_ontology(graph_id, ontology)
+                build_logger.debug(f"[{task_id}] 本体设置完成")
                 
                 # 添加文本（progress_callback 签名是 (msg, progress_ratio)）
                 def add_progress_callback(msg, progress_ratio):
@@ -431,15 +434,18 @@ def build_graph():
                     message=f"开始添加 {total_chunks} 个文本块...",
                     progress=15
                 )
-                
+
+                build_logger.debug(f"[{task_id}] 准备添加文本，共 {total_chunks} 个块")
                 episode_uuids = builder.add_text_batches(
-                    graph_id, 
+                    graph_id,
                     chunks,
                     batch_size=3,
                     progress_callback=add_progress_callback
                 )
+                build_logger.debug(f"[{task_id}] 文本添加完成，共 {len(episode_uuids)} 个 episode")
                 
                 # 等待Zep处理完成（查询每个episode的processed状态）
+                build_logger.debug(f"[{task_id}] 开始等待处理，共 {len(episode_uuids)} 个 episode")
                 task_manager.update_task(
                     task_id,
                     message="等待Zep处理数据...",

@@ -1447,7 +1447,7 @@ def generate_profiles():
                 "error": "没有找到符合条件的实体"
             }), 400
         
-        generator = OasisProfileGenerator()
+        generator = OasisProfileGenerator(graph_id=graph_id)
         profiles = generator.generate_profiles_from_entities(
             entities=filtered.entities,
             use_llm=use_llm
@@ -2478,7 +2478,7 @@ def interview_all_agents():
         simulation_id = data.get('simulation_id')
         prompt = data.get('prompt')
         platform = data.get('platform')  # 可选：twitter/reddit/None
-        timeout = data.get('timeout', 180)
+        timeout = data.get('timeout', 240)
 
         if not simulation_id:
             return jsonify({

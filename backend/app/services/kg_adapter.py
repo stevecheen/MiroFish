@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional
 import logging
 
 from ..config import Config
+from graphiti_core.embedder import EmbedderClient as EmbeddingClient
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class KnowledgeGraphAdapter(ABC):
         pass
 
     @abstractmethod
-    def search(self, graph_id: str, query: str, limit: int = 10) -> List[Dict]:
+    def search(self, graph_id: str, query: str, limit: int = 10, scope: str = "all", reranker: str = None) -> List[Dict]:
         """搜索"""
         pass
 
@@ -108,9 +109,23 @@ class ZepCloudAdapter(KnowledgeGraphAdapter):
     def get_episode(self, episode_uuid: str) -> Any:
         return self.client.graph.episode.get(uuid_=episode_uuid)
 
-    def search(self, graph_id: str, query: str, limit: int = 10) -> List[Dict]:
-        result = self.client.graph.search(graph_id=graph_id, query=query, limit=limit)
-        return [r.model_dump() for r in result.results] if hasattr(result, 'results') else []
+    def search(self, graph_id: str, query: str, limit: int = 10, scope: str = "all", reranker: str = None):
+        """搜索图谱
+
+        返回 GraphSearchResults 对象：
+        - scope="edges": 结果在 .edges 中
+        - scope="nodes": 结果在 .nodes 中
+        - scope="all": 结果同时在 .edges 和 .nodes 中
+        """
+        try:
+            result = self.client.graph.search(graph_id=graph_id, query=query, limit=limit, scope=scope, reranker=reranker)
+            logger.info(f"[ZepCloud search] query={query}, edges={len(result.edges) if hasattr(result, 'edges') and result.edges else 0}, nodes={len(result.nodes) if hasattr(result, 'nodes') and result.nodes else 0}")
+            return result
+        except Exception as e:
+            logger.error(f"[ZepCloud search] API调用失败: {e}")
+            # 返回空的 GraphSearchResults
+            from zep_cloud.types.graph_search_results import GraphSearchResults
+            return GraphSearchResults(edges=[], nodes=[], episodes=[])
 
     def get_nodes(self, graph_id: str, limit: int = 100, cursor: str = None) -> List[Any]:
         kwargs = {"limit": limit}
@@ -150,8 +165,49 @@ class ZepCloudAdapter(KnowledgeGraphAdapter):
         return {"graph_id": graph_id}
 
 
+# 自定义 Embedder，支持可配置的批处理大小
+class SingleEmbeddingEmbedder(EmbeddingClient):
+    """自定义 embedder，支持可配置的批处理大小
+
+    Args:
+        base: 基础 embedder
+        batch_size: 批量大小，默认 10（阿里百炼支持），设为 1 则逐个处理
+    """
+
+    def __init__(self, base, batch_size: int = 10):
+        self.base = base
+        self.batch_size = batch_size
+
+    async def create(self, input_data):
+        # 如果是列表，根据列表长度决定返回格式
+        if isinstance(input_data, list):
+            if len(input_data) == 1:
+                return await self.base.create(input_data[0])
+            elif len(input_data) == 0:
+                return await self.base.create("")
+            else:
+                # 多个输入，调用批量处理
+                return await self.create_batch(input_data)
+        return await self.base.create(input_data)
+
+    async def create_batch(self, input_data_list):
+        # 逐个处理，避免兼容性问题
+        results = []
+        for text in input_data_list:
+            embedding = await self.base.create(text)
+            results.append(embedding)
+        return results
+
+
 class GraphitiAdapter(KnowledgeGraphAdapter):
-    """Graphiti 适配器 - 本地部署"""
+    """Graphiti 适配器 - 本地部署
+
+    注意：类级别的 event loop 会在应用退出时自动释放，
+    不需要手动关闭。长时间运行的服务器不需要关闭 event loop。
+    """
+
+    # 类级别的 event loop，供所有实例共享
+    _event_loop = None
 
     def __init__(self):
         import os
@@ -189,13 +245,22 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
         llm_client = OpenAIClient(config=llm_config)
 
         # 配置 Embedder 客户端（可独立配置）
+        # 注意：一些 embedding API 不支持批量请求
+        # 因此我们创建一个自定义包装器来确保每次只处理单个文本
         embedder_config = OpenAIEmbedderConfig(
             api_key=embedding_api_key,
             base_url=embedding_base_url,
             embedding_model=Config.EMBEDDING_MODEL,
             embedding_dim=Config.EMBEDDING_DIM,
         )
-        embedder_client = OpenAIEmbedder(config=embedder_config)
+        logger.debug("embedding_base_url:" + embedding_base_url)
+        base_embedder = OpenAIEmbedder(config=embedder_config)
+
+        # 使用自定义包装器，支持可配置的批处理大小
+        # 默认 batch_size=10（阿里百炼支持），可在 Config 中配置
+        batch_size = getattr(Config, 'EMBEDDING_BATCH_SIZE', 10)
+        embedder_client = SingleEmbeddingEmbedder(base_embedder, batch_size=batch_size)
+        logger.debug(f"model: {Config.EMBEDDING_MODEL}, batch_size: {batch_size}")
 
         self.client = Graphiti(
             uri=Config.NEO4J_URI,
@@ -217,28 +282,41 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
 
         # 初始化数据库索引
         try:
-            import asyncio
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             loop.run_until_complete(self.client.build_indices_and_constraints())
-            loop.close()
+            # 不关闭 loop，保存起来供后续使用
+            GraphitiAdapter._event_loop = loop
             logger.info("Graphiti 数据库索引初始化完成")
         except Exception as e:
             logger.warning(f"数据库索引初始化警告: {e}")
 
         logger.info("GraphitiAdapter 初始化完成")
 
-    def _run_async(self, coro):
-        """同步调用异步方法的包装器，使用持久化事件循环"""
+    def _run_async(self, coro, timeout: int = 300):
+        """同步调用异步方法的包装器，使用类级别的 event loop，带超时保护"""
         import asyncio
+        import concurrent.futures
 
-        # 创建持久化的事件循环（线程级别）
-        if not hasattr(self, '_loop') or self._loop.is_closed():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
+        # 使用类级别的 event loop
+        if GraphitiAdapter._event_loop is None or GraphitiAdapter._event_loop.is_closed():
+            GraphitiAdapter._event_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(GraphitiAdapter._event_loop)
 
-        result = self._loop.run_until_complete(coro)
-        return result
+        # 使用线程池执行，避免阻塞
+        def run_in_loop():
+            return GraphitiAdapter._event_loop.run_until_complete(coro)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_in_loop)
+                return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            logger.error(f"Graphiti 操作超时 ({timeout}秒)")
+            raise TimeoutError(f"Graphiti operation timed out after {timeout} seconds")
+        except Exception as e:
+            logger.error(f"Graphiti 操作失败: {str(e)}")
+            raise
 
     def _get_group(self, graph_id: str) -> str:
         """获取或创建 group"""
@@ -297,181 +375,52 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
             return {"uuid": episode_uuid, "name": record["e"]["name"]} if record else None
 
     def add_episodes_batch(self, graph_id: str, texts: List[str], batch_size: int = 10) -> List[Any]:
-        """批量添加内容，使用同步驱动，并提取实体"""
+        """批量添加内容，使用 Graphiti 原生的 add_episode API"""
+        from datetime import datetime, timezone
+        from graphiti_core.nodes import EpisodeType
+
         results = []
         group = self._get_group(graph_id)
+        now = datetime.now(timezone.utc)
 
-        # 直接添加 episodes
+        # 获取实体类型（如果有的话）
+        entity_types = getattr(self, '_entity_types', None)
+        if entity_types:
+            logger.info(f"Graphiti: 使用 {len(entity_types)} 个实体类型进行提取: {list(entity_types.keys())}")
+
+        # 使用 Graphiti 原生的 add_episode 方法
+        # 它会自动：1. 用 embedder 做嵌入 2. 用 LLM 提取实体和关系
         for i, text in enumerate(texts):
-            result = self.add_episode(graph_id, text)
-            results.append(result)
-            if (i + 1) % batch_size == 0:
-                logger.info(f"已添加 {i + 1}/{len(texts)} 条内容")
+            episode_name = f"episode_{now.strftime('%Y%m%d%H%M%S')}_{i}"
 
-        # 提取实体
-        self._extract_entities_from_texts(graph_id, texts)
-
-        logger.info(f"图谱实体全部构建完成: {graph_id}, 共 {len(results)} 条")
-        return results
-
-    def _extract_entities_from_texts(self, graph_id: str, texts: List[str]):
-        """从文本中提取实体并存储到 Neo4j"""
-        import uuid
-
-        # 合并所有文本进行实体提取
-        combined_text = "\n\n".join(texts)
-
-        # 使用 LLM 提取实体
-        entities_json = self._call_llm_for_entities(combined_text)
-
-        if not entities_json:
-            logger.warning("未能从文本中提取到实体")
-            return
-
-        # 解析实体
-        try:
-            import json
-            import re
-
-            # 尝试直接解析
             try:
-                entities_data = json.loads(entities_json)
-            except json.JSONDecodeError:
-                # 尝试提取 JSON 数组
-                match = re.search(r'\[.*\]', entities_json, re.DOTALL)
-                if match:
-                    entities_data = json.loads(match.group())
-                else:
-                    raise ValueError("No JSON array found")
-
-            if not entities_data or not isinstance(entities_data, list):
-                logger.warning("未提取到实体数据")
-                return
-
-            logger.info(f"提取到 {len(entities_data)} 个实体")
-        except Exception as e:
-            logger.error(f"解析实体数据失败: {e}, 内容: {entities_json[:300]}")
-            return
-
-        # 存储实体到 Neo4j
-        with self._sync_driver.session() as session:
-            for entity in entities_data:
-                entity_name = entity.get("name")
-                entity_type = entity.get("type", "Entity")
-                description = entity.get("description", "")
-                relationships = entity.get("relationships", [])
-
-                if not entity_name:
-                    continue
-
-                # 确保 entity_type 有效，否则使用默认标签
-                if not entity_type or not entity_type.strip():
-                    entity_label = "Entity"
-                else:
-                    entity_label = entity_type.strip()
-                    # Neo4j 标签不能以数字开头
-                    if entity_label[0].isdigit():
-                        entity_label = f"Type{entity_label}"
-
-                # 创建实体节点并关联到 Group
-                # 实体同时拥有动态标签和 Entity 基类标签，便于查询
-                entity_uuid = str(uuid.uuid4())
-                query = f"""
-                MERGE (g:Group {{name: $group_id}})
-                MERGE (e:`{entity_label}` {{name: $name, group_id: $group_id}})
-                SET e:Entity,
-                    e.uuid = $uuid,
-                    e.summary = $summary,
-                    e.created_at = datetime(),
-                    e.entity_type = $type
-                MERGE (e)-[:MEMBER_OF]->(g)
-                RETURN e
-                """
-                session.run(
-                    query,
-                    name=entity_name,
-                    uuid=entity_uuid,
-                    summary=description,
-                    type=entity_type,
-                    group_id=graph_id
+                # 调用 Graphiti 原生 API，传入 entity_types
+                result = self._run_async(
+                    self.client.add_episode(
+                        name=episode_name,
+                        episode_body=text,
+                        source_description="MiroFish document",
+                        reference_time=now,
+                        source=EpisodeType.text,
+                        group_id=group,
+                        entity_types=entity_types,  # 传入实体类型定义
+                    )
                 )
 
-                # 创建关系
-                for rel in relationships:
-                    target = rel.get("target")
-                    rel_type = rel.get("type", "RELATED_TO")
-                    fact = rel.get("fact", "")
+                # 从返回结果中获取 episode 的 uuid
+                episode_uuid = None
+                if result and hasattr(result, 'episode'):
+                    episode_uuid = getattr(result.episode, 'uuid_', None) or getattr(result.episode, 'uuid', None)
 
-                    if target:
-                        rel_query = """
-                        MATCH (e1:Entity {name: $source, group_id: $group_id})
-                        MATCH (e2:Entity {name: $target, group_id: $group_id})
-                        MERGE (e1)-[r:RELATED {fact: $fact, fact_type: $type}]->(e2)
-                        SET r.created_at = datetime()
-                        """
-                        session.run(
-                            rel_query,
-                            source=entity_name,
-                            target=target,
-                            group_id=graph_id,
-                            fact=fact,
-                            type=rel_type
-                        )
+                logger.info(f"Graphiti 原生添加 episode {i+1}/{len(texts)}: {episode_uuid}")
+                results.append({"uuid": episode_uuid, "name": episode_name})
 
-        logger.info(f"实体提取完成: {len(entities_data)} 个实体")
+            except Exception as e:
+                logger.error(f"添加 episode 失败: {str(e)}")
+                results.append({"uuid": None, "name": episode_name, "error": str(e)})
 
-    def _call_llm_for_entities(self, text: str) -> str:
-        """调用 LLM 提取实体"""
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=Config.LLM_API_KEY,
-            base_url=Config.LLM_BASE_URL
-        )
-
-        prompt = f"""从以下文本中提取实体和关系。
-
-重要：直接返回JSON数组，不要任何markdown格式，不要```标记。
-
-要求返回格式：
-[
-  {{
-    "name": "实体名",
-    "type": "实体类型",
-    "description": "描述",
-    "relationships": [
-      {{"target": "目标实体", "type": "关系类型", "fact": "事实描述"}}
-    ]
-  }}
-]
-
-文本内容：
-{text[:3000]}
-
-直接返回JSON数组："""
-
-        try:
-            response = client.chat.completions.create(
-                model=Config.LLM_MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": "你是一个实体关系提取助手。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=2000
-            )
-            # 清理 JSON（去除 markdown 代码块）
-            content = response.choices[0].message.content
-            content = content.strip()
-            # 去除 ```json 和 ``` 标记
-            if content.startswith("```"):
-                content = content.split("\n", 1)[1] if "\n" in content else content
-            if content.endswith("```"):
-                content = content.rsplit("```", 1)[0]
-            return content.strip()
-        except Exception as e:
-            logger.error(f"LLM 实体提取失败: {e}")
-            return "[]"
+        logger.info(f"Graphiti 实体全部构建完成: {graph_id}, 共 {len(results)} 条")
+        return results
 
     def get_episode(self, episode_uuid: str) -> Any:
         """使用同步驱动获取 episode"""
@@ -485,46 +434,131 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
             result = session.run(query, uuid=episode_uuid)
             record = result.single()
             if record:
-                return dict(record)
+                data = dict(record)
+                # Graphiti 模式下添加是同步的，返回 processed=True 表示已完成
+                data['processed'] = True
+                logger.debug(f"[get_episode] uuid={episode_uuid}, processed=True")
+                return data
+            logger.warning(f"[get_episode] uuid={episode_uuid}, 未找到 episode")
             return None
 
-    def search(self, graph_id: str, query: str, limit: int = 10) -> List[Dict]:
-        """使用同步驱动搜索（简单实现：搜索 episodes 内容）"""
+    def search(self, graph_id: str, query: str, limit: int = 10, scope: str = "all", reranker: str = None):
+        logger.info(f"[GraphitiAdapter.search] 调用")
+        """使用同步驱动搜索
+
+        返回兼容对象格式：
+        - scope="edges": 返回带 .edges 属性的对象
+        - scope="nodes": 返回带 .nodes 属性的对象
+        - scope="all": 返回带 .edges 和 .nodes 属性的对象
+        """
+        from dataclasses import dataclass, field
+        import re
+
+        @dataclass
+        class SearchResult:
+            edges: list = field(default_factory=list)
+            nodes: list = field(default_factory=list)
+
         group = self._get_group(graph_id)
+        result = SearchResult()
+
+        # 从查询中提取关键词（移除"关于...的所有信息"等前缀）
+        search_keyword = query
+        if '的' in search_keyword:
+            match = re.search(r'关于(.+?)的', search_keyword)
+            if match:
+                search_keyword = match.group(1).strip()
+        if len(search_keyword) > 10:
+            search_keyword = search_keyword[:10]
+
         with self._sync_driver.session() as session:
-            # 简单的文本搜索：匹配 episodes 内容
-            query_cypher = """
-            MATCH (e:Episodic {group_id: $group})
-            WHERE e.content CONTAINS $search_text
+            # 搜索 Episodes 作为事实来源
+            episode_query = """
+            MATCH (e:Episodic {group_id: $gid})
+            WHERE e.content CONTAINS $search
             RETURN e.content as content, e.uuid as uuid, e.name as name
-            LIMIT $limit
             """
-            result = session.run(
-                query_cypher,
-                group=group,
-                search_text=query,
-                limit=limit
+            episode_result = session.run(
+                episode_query,
+                gid=group,
+                search=search_keyword
             )
-            return [{"content": r["content"], "uuid": r["uuid"], "name": r["name"]} for r in result]
+
+            episodes = [{"content": r["content"], "uuid": r["uuid"], "name": r["name"]} for r in episode_result]
+
+            # 根据 scope 返回对应格式
+            if scope in ("edges", "all"):
+                # 将 episodes 内容转为 fact 格式
+                for ep in episodes:
+                    class Edge:
+                        def __init__(self, fact):
+                            self.fact = fact
+                    result.edges.append(Edge(ep.get("content", "")))
+
+            if scope in ("nodes", "all"):
+                # 搜索相关实体节点
+                entity_query = """
+                MATCH (e:Entity {group_id: $gid})
+                WHERE e.name CONTAINS $search OR e.summary CONTAINS $search
+                RETURN e.uuid as uuid_, e.name as name, e.summary as summary
+                """
+                entity_result = session.run(
+                    entity_query,
+                    gid=group,
+                    search=search_keyword
+                )
+
+                for ent in entity_result:
+                    class Node:
+                        def __init__(self, name, summary):
+                            self.name = name
+                            self.summary = summary if summary else ""
+                    result.nodes.append(Node(ent["name"], ent.get("summary")))
+
+        return result
 
     def get_nodes(self, graph_id: str, limit: int = 100, cursor: str = None) -> List[Any]:
         """通过同步驱动查询实体节点"""
         with self._sync_driver.session() as session:
+            # Graphiti 使用 group_id 属性来区分不同的图谱
             query = """
-            MATCH (e:Entity)-[:MEMBER_OF]->(g:Group {name: $group})
+            MATCH (e:Entity {group_id: $group_id})
             RETURN e.uuid as uuid_, e.name as name, labels(e) as labels,
                    e.summary as summary, e.created_at as created_at,
                    e.entity_type as entity_type
             LIMIT $limit
             """
-            result = session.run(query, group=graph_id, limit=limit)
+            result = session.run(query, group_id=graph_id, limit=limit)
             nodes = [dict(record) for record in result]
-            # 转换格式以兼容前端，将 entity_type 放入 attributes
+            logger.info(f"[get_nodes] graph_id={graph_id}, 查询到 {len(nodes)} 个节点")
+
+            # 转换格式以兼容前端
             for node in nodes:
                 if 'attributes' not in node:
                     node['attributes'] = {}
-                if node.get('entity_type'):
-                    node['attributes']['entity_type'] = node['entity_type']
+
+                # 优先使用 entity_type 属性
+                entity_type = node.get('entity_type')
+                if entity_type:
+                    node['labels'] = [entity_type]
+                    node['attributes']['entity_type'] = entity_type
+                else:
+                    # 从标签中提取实体类型（第一个非 Entity 的标签）
+                    labels = node.get('labels', [])
+                    found_type = None
+                    for label in labels:
+                        if label and label != 'Entity':
+                            found_type = label
+                            break
+
+                    if found_type:
+                        node['labels'] = [found_type]
+                        node['attributes']['entity_type'] = found_type
+                    else:
+                        # 如果都没有，使用节点名称作为类型
+                        node['labels'] = ['Entity']
+                        node['attributes']['entity_type'] = 'Entity'
+
             return nodes
 
     def get_node(self, node_uuid: str) -> Any:
@@ -563,8 +597,7 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
         """通过同步驱动查询边"""
         with self._sync_driver.session() as session:
             query = """
-            MATCH (e1:Entity)-[r]-(e2:Entity)
-            WHERE e1.group_id = $group OR e2.group_id = $group
+            MATCH (e1:Entity {group_id: $group_id})-[r]-(e2:Entity {group_id: $group_id})
             RETURN r.uuid as uuid_, type(r) as name, r.fact as fact,
                    r.fact_type as fact_type,
                    e1.uuid as source_node_uuid, e2.uuid as target_node_uuid,
@@ -573,7 +606,7 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
                    r.invalid_at as invalid_at, r.expired_at as expired_at
             LIMIT $limit
             """
-            result = session.run(query, group=graph_id, limit=limit)
+            result = session.run(query, group_id=graph_id, limit=limit)
             edges = [dict(record) for record in result]
             # 兼容前端格式
             for edge in edges:
@@ -586,22 +619,17 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
     def delete(self, graph_id: str) -> bool:
         """使用同步驱动删除图谱"""
         with self._sync_driver.session() as session:
-            # 删除关联边
+            # 删除关联边（使用 group_id 属性）
             session.run("""
                 MATCH (e1:Entity)-[r]-(e2:Entity)
-                WHERE e1.group = $group OR e2.group = $group
+                WHERE e1.group_id = $group_id OR e2.group_id = $group_id
                 DELETE r
-            """, group=graph_id)
-            # 删除实体节点
+            """, group_id=graph_id)
+            # 删除实体节点（使用 group_id 属性）
             session.run("""
-                MATCH (e:Entity)-[:MEMBER_OF]->(g:Group {name: $group})
+                MATCH (e:Entity {group_id: $group_id})
                 DELETE e
-            """, group=graph_id)
-            # 删除组节点
-            session.run("""
-                MATCH (g:Group {name: $group})
-                DELETE g
-            """, group=graph_id)
+            """, group_id=graph_id)
 
         if graph_id in self._graph_id_to_group:
             del self._graph_id_to_group[graph_id]
@@ -610,28 +638,44 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
         return True
 
     def set_ontology(self, graph_id: str, ontology: Dict) -> bool:
-        # Graphiti 通过 Pydantic 模型定义实体类型
-        # 这里简化处理：仅记录 ontology 配置
-        logger.info(f"Graphiti: 设置本体 {graph_id}, ontology types: {list(ontology.keys())}")
-        # 实际使用时需要动态创建实体类
+        """设置实体类型（Graphiti 模式）"""
+        import warnings
+        from typing import Optional
+        from pydantic import Field
+        from graphiti_core.nodes import EntityNode
+
+        # graph_builder.set_ontology 已经把 ontology 转换成 Pydantic 类
+        # 格式: {'entities': {类名: 类}, 'edges': {...}}
+        entity_types = {}
+
+        if ontology.get("entities") and isinstance(ontology.get("entities"), dict):
+            entities = ontology.get("entities", {})
+            for name, entity_class in entities.items():
+                entity_types[name] = entity_class
+            logger.info(f"Graphiti: 使用已处理的实体类型，共 {len(entity_types)} 个")
+        else:
+            logger.warning(f"Graphiti: ontology 格式异常: {list(ontology.keys())}")
+
+        # 存储到实例变量
+        self._entity_types = entity_types
+
         return True
 
     def get_graph_info(self, graph_id: str) -> Dict:
         """使用同步驱动获取图谱信息"""
         with self._sync_driver.session() as session:
-            # 统计节点数量
+            # 统计节点数量 - 使用 group_id 属性
             node_result = session.run("""
-                MATCH (e:Entity)-[:MEMBER_OF]->(g:Group {name: $group})
+                MATCH (e:Entity {group_id: $group_id})
                 RETURN count(e) as count
-            """, group=graph_id)
+            """, group_id=graph_id)
             node_count = node_result.single()["count"] if node_result.single() else 0
 
-            # 统计边数量
+            # 统计边数量 - 使用 group_id 属性
             edge_result = session.run("""
-                MATCH (e1:Entity)-[r]-(e2:Entity)
-                WHERE e1.group = $group OR e2.group = $group
+                MATCH (e1:Entity {group_id: $group_id})-[r]-(e2:Entity {group_id: $group_id})
                 RETURN count(r) as count
-            """, group=graph_id)
+            """, group_id=graph_id)
             edge_count = edge_result.single()["count"] if edge_result.single() else 0
 
         return {
@@ -652,7 +696,7 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
 _adapter_cache: Optional[KnowledgeGraphAdapter] = None
 
 
-def get_knowledge_graph_adapter(force_refresh: bool = False) -> KnowledgeGraphAdapter:
+def get_knowledge_graph_adapter(force_refresh: bool = True) -> KnowledgeGraphAdapter:
     """
     获取知识图谱适配器实例
 
@@ -668,6 +712,7 @@ def get_knowledge_graph_adapter(force_refresh: bool = False) -> KnowledgeGraphAd
         return _adapter_cache
 
     mode = Config.KNOWLEDGE_GRAPH_MODE
+    logger.info(f"[kg_adapter] 使用模式: {mode}")
 
     if mode == 'local':
         _adapter_cache = GraphitiAdapter()

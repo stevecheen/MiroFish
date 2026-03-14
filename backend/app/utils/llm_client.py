@@ -36,26 +36,29 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         response_format: Optional[Dict] = None
     ) -> str:
         """
         发送聊天请求
-        
+
         Args:
             messages: 消息列表
             temperature: 温度参数
-            max_tokens: 最大token数
+            max_tokens: 最大token数（默认使用配置中的 LLM_MAX_TOKENS）
             response_format: 响应格式（如JSON模式）
             
         Returns:
             模型响应文本
         """
+        # 如果未指定 max_tokens，使用配置中的默认值
+        effective_max_tokens = max_tokens if max_tokens is not None else Config.LLM_MAX_TOKENS
+
         kwargs = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
         }
         
         if response_format:
@@ -71,16 +74,16 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
-        max_tokens: int = 4096
+        max_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         发送聊天请求并返回JSON
-        
+
         Args:
             messages: 消息列表
             temperature: 温度参数
-            max_tokens: 最大token数
-            
+            max_tokens: 最大token数（默认使用配置中的 LLM_MAX_TOKENS）
+
         Returns:
             解析后的JSON对象
         """

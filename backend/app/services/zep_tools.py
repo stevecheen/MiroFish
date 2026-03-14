@@ -1792,6 +1792,7 @@ class ZepToolsService:
 4. 语言自然，像真实采访一样
 5. 每个问题控制在50字以内，简洁明了
 6. 直接提问，不要包含背景说明或前缀
+7. 问题数量根据采访需求的复杂度决定，简单主题1-5个，复杂主题最多3个
 
 返回JSON格式：{"questions": ["问题1", "问题2", ...]}"""
 
@@ -1818,8 +1819,7 @@ class ZepToolsService:
             logger.warning(f"生成采访问题失败: {e}")
             return [
                 f"关于{interview_requirement}，您的观点是什么？",
-                "这件事对您或您所代表的群体有什么影响？",
-                "您认为应该如何解决或改进这个问题？"
+                "这件事对您或您所代表的群体有什么影响？"
             ]
     
     def _generate_interview_summary(

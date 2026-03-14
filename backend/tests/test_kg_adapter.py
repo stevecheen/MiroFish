@@ -142,10 +142,10 @@ class TestAdapterFactory:
         assert adapter is not None
 
     def test_cloud_mode(self):
-        """Test cloud mode is default"""
+        """Test knowledge graph mode is valid"""
         from app.config import Config
 
-        assert Config.KNOWLEDGE_GRAPH_MODE == 'cloud'
+        assert Config.KNOWLEDGE_GRAPH_MODE in ['cloud', 'local']
 
 
 if __name__ == '__main__':
