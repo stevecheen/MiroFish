@@ -696,7 +696,7 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
 _adapter_cache: Optional[KnowledgeGraphAdapter] = None
 
 
-def get_knowledge_graph_adapter(force_refresh: bool = True) -> KnowledgeGraphAdapter:
+def get_knowledge_graph_adapter(force_refresh: bool = False) -> KnowledgeGraphAdapter:
     """
     获取知识图谱适配器实例
 
