@@ -178,7 +178,7 @@ def generate_ontology():
         
         # 保存文件并提取文本
         document_texts = []
-        all_text = ""
+        all_text_parts = []
         
         for file in uploaded_files:
             if file and file.filename and allowed_file(file.filename):
@@ -197,7 +197,7 @@ def generate_ontology():
                 text = FileParser.extract_text(file_info["path"])
                 text = TextProcessor.preprocess_text(text)
                 document_texts.append(text)
-                all_text += f"\n\n=== {file_info['original_filename']} ===\n{text}"
+                all_text_parts.append(f"\n\n=== {file_info['original_filename']} ===\n{text}")
         
         if not document_texts:
             ProjectManager.delete_project(project.project_id)
@@ -207,6 +207,7 @@ def generate_ontology():
             }), 400
         
         # 保存提取的文本
+        all_text = "".join(all_text_parts)
         project.total_text_length = len(all_text)
         ProjectManager.save_extracted_text(project.project_id, all_text)
         logger.info(f"文本提取完成，共 {len(all_text)} 字符")

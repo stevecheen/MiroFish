@@ -319,7 +319,6 @@ class OasisProfileGenerator:
         def search_edges():
             """搜索边（事实/关系）- 带重试机制"""
             max_retries = 3
-            last_exception = None
             delay = 2.0
 
             for attempt in range(max_retries):
@@ -333,7 +332,6 @@ class OasisProfileGenerator:
                     )
                     return result
                 except Exception as e:
-                    last_exception = e
                     if attempt < max_retries - 1:
                         logger.debug(f"Zep边搜索第 {attempt + 1} 次失败: {str(e)[:80]}, 重试中...")
                         time.sleep(delay)
@@ -345,7 +343,6 @@ class OasisProfileGenerator:
         def search_nodes():
             """搜索节点（实体摘要）- 带重试机制"""
             max_retries = 3
-            last_exception = None
             delay = 2.0
             
             for attempt in range(max_retries):
@@ -358,7 +355,6 @@ class OasisProfileGenerator:
                         reranker="rrf"
                     )
                 except Exception as e:
-                    last_exception = e
                     if attempt < max_retries - 1:
                         logger.debug(f"Zep节点搜索第 {attempt + 1} 次失败: {str(e)[:80]}, 重试中...")
                         time.sleep(delay)

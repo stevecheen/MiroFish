@@ -82,6 +82,9 @@ class Config:
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
+
+    # LLM 超时配置（秒）
+    LLM_TIMEOUT = int(os.environ.get('LLM_TIMEOUT', '120'))
     
     @classmethod
     def validate(cls):

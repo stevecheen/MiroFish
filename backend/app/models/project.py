@@ -5,6 +5,7 @@
 
 import os
 import json
+import threading
 import uuid
 import shutil
 from datetime import datetime
@@ -108,6 +109,9 @@ class ProjectManager:
     # 内存缓存（项目ID -> Project 对象）
     _project_cache: Dict[str, Project] = {}
 
+    # 线程安全锁
+    _cache_lock = threading.Lock()
+
     # 列表缓存（用于 list_projects）
     _list_cache: Optional[List[Project]] = None
     _list_cache_time: Optional[datetime] = None
@@ -192,8 +196,9 @@ class ProjectManager:
             json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
 
         # 更新缓存
-        cls._project_cache[project.project_id] = project
-        cls._invalidate_cache()
+        with cls._cache_lock:
+            cls._project_cache[project.project_id] = project
+            cls._invalidate_cache()
     
     @classmethod
     def get_project(cls, project_id: str) -> Optional[Project]:
@@ -207,8 +212,9 @@ class ProjectManager:
             Project对象，如果不存在返回None
         """
         # 先从缓存获取
-        if project_id in cls._project_cache:
-            return cls._project_cache[project_id]
+        with cls._cache_lock:
+            if project_id in cls._project_cache:
+                return cls._project_cache[project_id]
 
         meta_path = cls._get_project_meta_path(project_id)
 
@@ -220,7 +226,8 @@ class ProjectManager:
 
         project = Project.from_dict(data)
         # 存入缓存
-        cls._project_cache[project_id] = project
+        with cls._cache_lock:
+            cls._project_cache[project_id] = project
         return project
     
     @classmethod
@@ -238,10 +245,11 @@ class ProjectManager:
 
         # 检查缓存是否有效
         now = datetime.now()
-        if cls._list_cache is not None and cls._list_cache_time is not None:
-            cache_age = (now - cls._list_cache_time).total_seconds()
-            if cache_age < cls._LIST_CACHE_TTL:
-                return cls._list_cache[:limit]
+        with cls._cache_lock:
+            if cls._list_cache is not None and cls._list_cache_time is not None:
+                cache_age = (now - cls._list_cache_time).total_seconds()
+                if cache_age < cls._LIST_CACHE_TTL:
+                    return cls._list_cache[:limit]
 
         # 重新加载列表
         projects = []
@@ -254,8 +262,9 @@ class ProjectManager:
         projects.sort(key=lambda p: p.created_at, reverse=True)
 
         # 更新缓存
-        cls._list_cache = projects
-        cls._list_cache_time = now
+        with cls._cache_lock:
+            cls._list_cache = projects
+            cls._list_cache_time = now
 
         return projects[:limit]
     
@@ -278,9 +287,10 @@ class ProjectManager:
         shutil.rmtree(project_dir)
 
         # 清除缓存
-        if project_id in cls._project_cache:
-            del cls._project_cache[project_id]
-        cls._invalidate_cache()
+        with cls._cache_lock:
+            if project_id in cls._project_cache:
+                del cls._project_cache[project_id]
+            cls._invalidate_cache()
 
         return True
     

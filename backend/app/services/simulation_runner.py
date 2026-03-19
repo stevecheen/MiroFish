@@ -405,6 +405,7 @@ class SimulationRunner:
         cls._action_queues[simulation_id] = action_queue
         
         # 启动模拟进程
+        main_log_file = None
         try:
             # 构建运行命令，使用完整路径
             # 新的日志结构：
@@ -467,6 +468,12 @@ class SimulationRunner:
             logger.info(f"模拟启动成功: {simulation_id}, pid={process.pid}, platform={platform}")
             
         except Exception as e:
+            # 关闭日志文件句柄，防止泄漏
+            if main_log_file is not None and simulation_id not in cls._stdout_files:
+                try:
+                    main_log_file.close()
+                except Exception:
+                    pass
             state.runner_status = RunnerStatus.FAILED
             state.error = str(e)
             cls._save_run_state(state)
