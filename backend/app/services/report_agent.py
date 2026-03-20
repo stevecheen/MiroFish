@@ -11,6 +11,7 @@ Report Agent服务
 
 import os
 import json
+import threading
 import time
 import re
 from typing import Dict, Any, List, Optional, Callable
@@ -392,6 +393,7 @@ class ReportStatus(str, Enum):
     GENERATING = "generating"
     COMPLETED = "completed"
     FAILED = "failed"
+    SECTION_FAILED = "section_failed"  # 章节生成失败，等待用户操作
 
 
 @dataclass
@@ -1194,7 +1196,50 @@ class ReportAgent:
             if params_desc:
                 desc_parts.append(f"  参数: {params_desc}")
         return "\n".join(desc_parts)
-    
+
+    # ── 章节级重试机制 ─────────────────────────────────────────
+
+    # 类级别事件字典，用于跨线程通信
+    _section_events: Dict[str, threading.Event] = {}   # report_id -> Event
+    _section_actions: Dict[str, str] = {}              # report_id -> "retry"|"skip"|"abort"
+
+    def _wait_for_user_action(self, report_id: str, timeout: int = 600) -> str:
+        """
+        阻塞等待用户操作指令（最多 timeout 秒）。
+
+        Returns:
+            "retry"   — 重试当前章节
+            "skip"    — 跳过当前章节
+            "abort"   — 中止整个报告生成
+            "timeout" — 超时，交由调用方决策
+        """
+        event = threading.Event()
+        ReportAgent._section_events[report_id] = event
+        got_signal = event.wait(timeout=timeout)
+        ReportAgent._section_events.pop(report_id, None)
+        if got_signal:
+            return ReportAgent._section_actions.pop(report_id, "retry")
+        return "timeout"
+
+    @classmethod
+    def resume_section(cls, report_id: str, action: str) -> bool:
+        """
+        由 API 层调用，向正在等待的生成线程发送操作指令。
+
+        Args:
+            report_id: 报告 ID
+            action: "retry" | "skip" | "abort"
+
+        Returns:
+            True 表示成功唤醒；False 表示没有等待中的任务
+        """
+        event = cls._section_events.get(report_id)
+        if event is None:
+            return False
+        cls._section_actions[report_id] = action
+        event.set()
+        return True
+
     def plan_outline(
         self, 
         progress_callback: Optional[Callable] = None
@@ -1689,72 +1734,192 @@ class ReportAgent:
             
             logger.info(f"大纲已保存到文件: {report_id}/outline.json")
             
-            # 阶段2: 逐章节生成（分章节保存）
+            # 阶段2: 逐章节生成（分章节保存，支持断点续传和章节级重试）
             report.status = ReportStatus.GENERATING
             
             total_sections = len(outline.sections)
             generated_sections = []  # 保存内容用于上下文
             
+            # 断点续传: 预加载已完成章节的内容到上下文
+            for i, section in enumerate(outline.sections):
+                section_num = i + 1
+                existing_content = ReportManager.load_section(report_id, section_num)
+                if existing_content is not None:
+                    completed_section_titles.append(section.title)
+                    generated_sections.append(f"## {section.title}\n\n{existing_content}")
+                    logger.info(f"断点续传: 跳过已完成章节 {section.title}")
+            
             for i, section in enumerate(outline.sections):
                 section_num = i + 1
                 base_progress = 20 + int((i / total_sections) * 70)
                 
-                # 更新进度
-                ReportManager.update_progress(
-                    report_id, "generating", base_progress,
-                    f"正在生成章节: {section.title} ({section_num}/{total_sections})",
-                    current_section=section.title,
-                    completed_sections=completed_section_titles
-                )
+                # 跳过已完成的章节（断点续传）
+                if section.title in completed_section_titles:
+                    continue
                 
-                if progress_callback:
-                    progress_callback(
-                        "generating", 
-                        base_progress, 
-                        f"正在生成章节: {section.title} ({section_num}/{total_sections})"
+                # 章节级重试循环
+                retry_count = 0
+                max_auto_retries = 3  # 用户无操作时的自动重试上限
+                
+                while True:
+                    # 更新进度
+                    ReportManager.update_progress(
+                        report_id, "generating", base_progress,
+                        f"正在生成章节: {section.title} ({section_num}/{total_sections})",
+                        current_section=section.title,
+                        completed_sections=completed_section_titles
                     )
-                
-                # 生成主章节内容
-                section_content = self._generate_section_react(
-                    section=section,
-                    outline=outline,
-                    previous_sections=generated_sections,
-                    progress_callback=lambda stage, prog, msg:
+                    
+                    if progress_callback:
                         progress_callback(
-                            stage, 
-                            base_progress + int(prog * 0.7 / total_sections),
-                            msg
-                        ) if progress_callback else None,
-                    section_index=section_num
-                )
-                
-                section.content = section_content
-                generated_sections.append(f"## {section.title}\n\n{section_content}")
-
-                # 保存章节
-                ReportManager.save_section(report_id, section_num, section)
-                completed_section_titles.append(section.title)
-
-                # 记录章节完成日志
-                full_section_content = f"## {section.title}\n\n{section_content}"
-
-                if self.report_logger:
-                    self.report_logger.log_section_full_complete(
-                        section_title=section.title,
-                        section_index=section_num,
-                        full_content=full_section_content.strip()
-                    )
-
-                logger.info(f"章节已保存: {report_id}/section_{section_num:02d}.md")
-                
-                # 更新进度
-                ReportManager.update_progress(
-                    report_id, "generating", 
-                    base_progress + int(70 / total_sections),
-                    f"章节 {section.title} 已完成",
-                    current_section=None,
-                    completed_sections=completed_section_titles
-                )
+                            "generating",
+                            base_progress,
+                            f"正在生成章节: {section.title} ({section_num}/{total_sections})"
+                        )
+                    
+                    try:
+                        # 生成主章节内容
+                        section_content = self._generate_section_react(
+                            section=section,
+                            outline=outline,
+                            previous_sections=generated_sections,
+                            progress_callback=lambda stage, prog, msg:
+                                progress_callback(
+                                    stage,
+                                    base_progress + int(prog * 0.7 / total_sections),
+                                    msg
+                                ) if progress_callback else None,
+                            section_index=section_num
+                        )
+                        
+                        section.content = section_content
+                        generated_sections.append(f"## {section.title}\n\n{section_content}")
+                        
+                        # 保存章节
+                        ReportManager.save_section(report_id, section_num, section)
+                        completed_section_titles.append(section.title)
+                        
+                        # 记录章节完成日志
+                        full_section_content = f"## {section.title}\n\n{section_content}"
+                        if self.report_logger:
+                            self.report_logger.log_section_full_complete(
+                                section_title=section.title,
+                                section_index=section_num,
+                                full_content=full_section_content.strip()
+                            )
+                        
+                        logger.info(f"章节已保存: {report_id}/section_{section_num:02d}.md")
+                        
+                        # 更新进度
+                        ReportManager.update_progress(
+                            report_id, "generating",
+                            base_progress + int(70 / total_sections),
+                            f"章节 {section.title} 已完成",
+                            current_section=None,
+                            completed_sections=completed_section_titles
+                        )
+                        break  # 章节成功，继续下一章节
+                    
+                    except Exception as section_err:
+                        retry_count += 1
+                        err_msg = str(section_err)
+                        logger.error(
+                            f"章节 '{section.title}' 生成失败 (第{retry_count}次): {err_msg}"
+                        )
+                        
+                        if self.report_logger:
+                            self.report_logger.log_error(
+                                err_msg,
+                                f"section_failed:{section.title}"
+                            )
+                        
+                        # 写入 section_failed 状态，通知前端
+                        ReportManager.update_progress(
+                            report_id, "section_failed", base_progress,
+                            f"章节生成失败: {err_msg}",
+                            current_section=section.title,
+                            completed_sections=completed_section_titles,
+                            failed_section={
+                                "index": section_num,
+                                "title": section.title,
+                                "error": err_msg,
+                                "retry_count": retry_count,
+                                "failed_at": datetime.now().isoformat()
+                            }
+                        )
+                        
+                        if progress_callback:
+                            progress_callback(
+                                "section_failed", base_progress,
+                                f"章节 '{section.title}' 生成失败，等待操作..."
+                            )
+                        
+                        # 等待用户操作 (重试/跳过/中止)，超时10分钟
+                        action = self._wait_for_user_action(report_id, timeout=600)
+                        
+                        if action == "retry":
+                            logger.info(f"用户选择重试章节: {section.title}")
+                            continue  # 重新执行 while 循环
+                        
+                        elif action == "skip":
+                            logger.info(f"用户选择跳过章节: {section.title}")
+                            placeholder = ReportSection(
+                                title=section.title,
+                                content=f"> ⚠️ 本章节生成失败，已跳过。错误信息: {err_msg}"
+                            )
+                            ReportManager.save_section(report_id, section_num, placeholder)
+                            generated_sections.append(
+                                f"## {section.title}\n\n[章节生成失败，已跳过]"
+                            )
+                            completed_section_titles.append(section.title)
+                            ReportManager.update_progress(
+                                report_id, "generating",
+                                base_progress + int(70 / total_sections),
+                                f"章节 {section.title} 已跳过",
+                                current_section=None,
+                                completed_sections=completed_section_titles
+                            )
+                            break
+                        
+                        elif action == "abort":
+                            logger.info(f"用户选择中止报告生成")
+                            raise RuntimeError(
+                                f"用户中止: 章节 '{section.title}' 失败"
+                            ) from section_err
+                        
+                        else:
+                            # timeout: 自动重试，超过上限则自动跳过
+                            if retry_count < max_auto_retries:
+                                logger.warning(
+                                    f"等待超时，自动重试章节 (第{retry_count}次): {section.title}"
+                                )
+                                continue
+                            else:
+                                logger.warning(
+                                    f"章节 '{section.title}' 超过最大重试次数，自动跳过"
+                                )
+                                placeholder = ReportSection(
+                                    title=section.title,
+                                    content=(
+                                        f"> ⚠️ 本章节多次重试失败，已自动跳过。"
+                                        f"错误信息: {err_msg}"
+                                    )
+                                )
+                                ReportManager.save_section(
+                                    report_id, section_num, placeholder
+                                )
+                                generated_sections.append(
+                                    f"## {section.title}\n\n[章节生成失败，已自动跳过]"
+                                )
+                                completed_section_titles.append(section.title)
+                                ReportManager.update_progress(
+                                    report_id, "generating",
+                                    base_progress + int(70 / total_sections),
+                                    f"章节 {section.title} 自动跳过",
+                                    current_section=None,
+                                    completed_sections=completed_section_titles
+                                )
+                                break
             
             # 阶段3: 组装完整报告
             if progress_callback:
@@ -2188,7 +2353,69 @@ class ReportManager:
 
         logger.info(f"章节已保存: {report_id}/{file_suffix}")
         return file_path
-    
+
+    @classmethod
+    def load_section(cls, report_id: str, section_index: int) -> Optional[str]:
+        """
+        读取已保存的章节内容（不含 Markdown 标题行）。
+
+        用于断点续传：若 section_XX.md 已存在，返回其正文内容；
+        否则返回 None，表示该章节尚未生成。
+        """
+        file_path = os.path.join(
+            cls._get_report_folder(report_id),
+            f"section_{section_index:02d}.md"
+        )
+        if not os.path.exists(file_path):
+            return None
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        # 跳过首行 "## 标题" 和紧随的空行，只返回正文
+        lines = content.split('\n')
+        start = 0
+        if lines and lines[0].startswith('## '):
+            start = 1
+            if start < len(lines) and lines[start] == '':
+                start = 2
+        return '\n'.join(lines[start:]).strip()
+
+    @classmethod
+    def load_report_meta(cls, report_id: str) -> Optional[Dict[str, Any]]:
+        """
+        读取报告的 meta.json，返回原始字典。
+        用于服务重启后从 report_id 恢复生成所需的上下文。
+        """
+        meta_path = os.path.join(cls._get_report_folder(report_id), "meta.json")
+        if not os.path.exists(meta_path):
+            return None
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    @classmethod
+    def reset_progress_for_resume(cls, report_id: str) -> None:
+        """
+        将 progress.json 的 status 重置为 'generating'，
+        清除 failed_section，让前端轮询知道生成已重新开始。
+        """
+        progress_path = os.path.join(cls._get_report_folder(report_id), "progress.json")
+        if not os.path.exists(progress_path):
+            return
+        try:
+            with open(progress_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            data['status'] = 'generating'
+            data['message'] = '正在从断点恢复生成...'
+            data.pop('failed_section', None)
+            from datetime import datetime
+            data['updated_at'] = datetime.now().isoformat()
+            with open(progress_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     @classmethod
     def _clean_section_content(cls, content: str, section_title: str) -> str:
         """
@@ -2259,13 +2486,14 @@ class ReportManager:
     
     @classmethod
     def update_progress(
-        cls, 
-        report_id: str, 
-        status: str, 
-        progress: int, 
+        cls,
+        report_id: str,
+        status: str,
+        progress: int,
         message: str,
         current_section: str = None,
-        completed_sections: List[str] = None
+        completed_sections: List[str] = None,
+        failed_section: Dict[str, Any] = None
     ) -> None:
         """
         更新报告生成进度
@@ -2280,6 +2508,7 @@ class ReportManager:
             "message": message,
             "current_section": current_section,
             "completed_sections": completed_sections or [],
+            "failed_section": failed_section,
             "updated_at": datetime.now().isoformat()
         }
         

@@ -59,3 +59,20 @@ export const downloadReport = (reportId) => {
     responseType: 'blob'
   })
 }
+
+/**
+ * 向正在等待的章节生成线程发送操作指令
+ * @param {string} reportId
+ * @param {'retry'|'skip'|'abort'} action - 操作类型
+ */
+export const retrySectionAction = (reportId, action) => {
+  return service.post(`/api/report/${reportId}/retry-section`, { action })
+}
+
+/**
+ * 获取报告生成进度（含章节失败详情）
+ * @param {string} reportId
+ */
+export const getReportProgress = (reportId) => {
+  return service.get(`/api/report/${reportId}/progress`)
+}

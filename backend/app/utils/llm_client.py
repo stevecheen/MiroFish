@@ -4,11 +4,23 @@ LLM客户端封装
 """
 
 import json
+import logging
 import re
+import time
 from typing import Optional, Dict, Any, List
+
+import httpx
 from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError
 
 from ..config import Config
+
+logger = logging.getLogger(__name__)
+
+# 网络瞬断重试配置
+_RETRYABLE_EXCEPTIONS = (APIConnectionError, APITimeoutError, httpx.ConnectError, httpx.RemoteProtocolError)
+_MAX_RETRIES = 3
+_RETRY_DELAY = 2  # 首次重试等待秒数，后续翻倍
 
 
 class LLMClient:
@@ -65,11 +77,22 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
-        response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
-        # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
-        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-        return content
+        last_error = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                content = response.choices[0].message.content
+                # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
+                content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                return content
+            except _RETRYABLE_EXCEPTIONS as e:
+                last_error = e
+                wait = _RETRY_DELAY * (2 ** attempt)
+                logger.warning(f"LLM 连接失败（第 {attempt + 1}/{_MAX_RETRIES} 次），{wait}s 后重试: {e}")
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(wait)
+
+        raise last_error
     
     def chat_json(
         self,

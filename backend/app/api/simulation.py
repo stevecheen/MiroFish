@@ -305,9 +305,9 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
         # - preparing: 如果 config_generated=True 说明已完成
         # - running: 正在运行，说明准备早就完成了
         # - completed: 运行完成，说明准备早就完成了
-        # - stopped: 已停止，说明准备早就完成了
+        # - stopped / paused: 已停止（runner 或用户主动停止），准备文件仍存在
         # - failed: 运行失败（但准备是完成的）
-        prepared_statuses = ["ready", "preparing", "running", "completed", "stopped", "failed"]
+        prepared_statuses = ["ready", "preparing", "running", "completed", "stopped", "paused", "failed"]
         if status in prepared_statuses and config_generated:
             # 获取文件统计信息
             profiles_file = os.path.join(simulation_dir, "reddit_profiles.json")
@@ -1577,7 +1577,8 @@ def start_simulation():
 
             if is_prepared:
                 # 准备工作已完成，检查是否有正在运行的进程
-                if state.status == SimulationStatus.RUNNING:
+                # RUNNING 和 PAUSED（用户主动停止后状态）都需要检查底层进程是否还活着
+                if state.status in (SimulationStatus.RUNNING, SimulationStatus.PAUSED):
                     # 检查模拟进程是否真的在运行
                     run_state = SimulationRunner.get_run_state(simulation_id)
                     if run_state and run_state.runner_status.value == "running":

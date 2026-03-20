@@ -214,7 +214,7 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
         import asyncio
         from graphiti_core import Graphiti
         from graphiti_core.llm_client.config import LLMConfig
-        from graphiti_core.llm_client.openai_client import OpenAIClient
+        from ..utils.graphiti_llm_client import CompatibleGraphitiClient
         from graphiti_core.embedder import OpenAIEmbedder, OpenAIEmbedderConfig
 
         if not all([Config.NEO4J_URI, Config.NEO4J_USER, Config.NEO4J_PASSWORD]):
@@ -242,7 +242,7 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
             model=Config.LLM_MODEL_NAME,
             small_model=Config.LLM_MODEL_NAME,  # 使用相同模型
         )
-        llm_client = OpenAIClient(config=llm_config)
+        llm_client = CompatibleGraphitiClient(config=llm_config)
 
         # 配置 Embedder 客户端（可独立配置）
         # 注意：一些 embedding API 不支持批量请求
