@@ -12,7 +12,8 @@ dependencies = [
     # 核心框架
     "flask>=3.0.0",
     "flask-cors>=6.0.0",
-
+    "flask-caching>=2.0.0",
+    "flask-limiter>=3.0.0",
     # LLM 相关
     "openai>=1.0.0",
 
