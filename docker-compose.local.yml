@@ -11,9 +11,11 @@ services:
       neo4j:
         condition: service_healthy
     command: >
-      bash -c "git clone https://github.com/huamingjie0815/MiroFish.git . &&
-               npm run setup:all &&
-               npm run dev"
+      bash -c " if [ -d .git ]; then
+        git pull;
+      else
+        git clone https://github.com/huamingjie0815/MiroFish.git .;
+      fi && npm run setup:all && npm run dev"
     ports:
       - "3000:3000"
       - "5001:5001"
