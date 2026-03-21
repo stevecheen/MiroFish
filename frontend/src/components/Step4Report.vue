@@ -94,7 +94,7 @@
                 跳过
               </button>
               <button class="retry-btn retry-btn--danger" @click="handleRetryAction('abort')">
-                终止
+                /终止
               </button>
             </div>
           </div>
