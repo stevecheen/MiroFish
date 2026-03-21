@@ -21,15 +21,15 @@ services:
   neo4j:
     image: neo4j:latest
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "7475:7474"
+      - "7688:7687"
     environment:
-      - NEO4J_AUTH=neo4j/password
+      - NEO4J_AUTH=neo4j/neo4j123456
       - NEO4J_PLUGINS=["graph-data-science", "apoc"]
     volumes:
       - neo4j_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "neo4j status || exit 1"]
+      test: [ "CMD-SHELL", "neo4j status || exit 1" ]
       interval: 10s
       timeout: 5s
       retries: 5

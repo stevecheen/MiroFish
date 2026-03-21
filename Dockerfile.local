@@ -1,10 +1,5 @@
 FROM continuumio/anaconda3:latest
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm curl git && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN conda install -y python=3.12 && \
-    pip install uv
+RUN conda install -y -c conda-forge python=3.12 nodejs gcc uv
 
 WORKDIR /app
