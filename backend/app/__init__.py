@@ -101,6 +101,7 @@ def _recover_stuck_projects():
     try:
         for p in ProjectManager.list_projects():
             if p.status == ProjectStatus.GRAPH_BUILDING and p.graph_id:
+                
                 from .services.graphiti_adapter import _get_graphiti, _run, _neo4j_query
                 g = _get_graphiti()
                 r = _run(_neo4j_query(g,

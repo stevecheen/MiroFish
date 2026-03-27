@@ -39,7 +39,7 @@ def check_health():
         return False
 
 
-def upload_and_generate_ontology(seed_path):
+def upload_and_generate_ontology(seed_path, simulation_requirement=""):
     """上传种子文件并生成本体"""
     print(f"\n📄 上传种子文件: {seed_path}")
     with open(seed_path, "r", encoding="utf-8") as f:
@@ -50,9 +50,12 @@ def upload_and_generate_ontology(seed_path):
     print("\n🧠 正在生成本体（实体类型 & 关系类型）...")
     r = requests.post(
         f"{API_BASE}/graph/ontology/generate",
-        files={"file": (os.path.basename(seed_path), content, "text/plain")},
+        files={"files": (os.path.basename(seed_path), content, "text/plain")},
+        data={"simulation_requirement": simulation_requirement},
         timeout=120,
     )
+    print(f"   状态码: {r.status_code}")
+    print(f"   响应: {r.text}...")
     r.raise_for_status()
     data = r.json()
 
@@ -156,6 +159,7 @@ def main():
     parser = argparse.ArgumentParser(description="MiroFish-Local Quick Demo")
     parser.add_argument("--seed", default=DEFAULT_SEED, help="种子文件路径")
     parser.add_argument("--skip-build", action="store_true", help="跳过图谱构建，仅生成本体")
+    parser.add_argument("--simulation-requirement", default="结果要简洁干脆，字数控制100", help="模拟需求描述（可选）")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -178,7 +182,7 @@ def main():
         sys.exit(1)
 
     # 3. 生成本体
-    result = upload_and_generate_ontology(args.seed)
+    result = upload_and_generate_ontology(args.seed, args.simulation_requirement)
 
     # 4. 构建图谱（可选）
     if not args.skip_build:

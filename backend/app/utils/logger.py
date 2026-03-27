@@ -78,7 +78,7 @@ def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.
     # 确保 Windows 下使用 UTF-8 编码，避免中文乱码
     _ensure_utf8_stdout()
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.DEBUG)
     console_handler.setFormatter(simple_formatter)
     
     # 添加处理器

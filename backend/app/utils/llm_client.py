@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 网络瞬断重试配置
 _RETRYABLE_EXCEPTIONS = (APIConnectionError, APITimeoutError, httpx.ConnectError, httpx.RemoteProtocolError)
-_MAX_RETRIES = 3
+_MAX_RETRIES = 2
 _RETRY_DELAY = 2  # 首次重试等待秒数，后续翻倍
 
 
@@ -82,6 +82,7 @@ class LLMClient:
             try:
                 response = self.client.chat.completions.create(**kwargs)
             except _RETRYABLE_EXCEPTIONS as e:
+                print(f"LLM 连接异常: {e}")
                 last_error = e
                 wait = _RETRY_DELAY * (2 ** attempt)
                 logger.warning(f"LLM 连接失败（第 {attempt + 1}/{_MAX_RETRIES} 次），{wait}s 后重试: {e}")

@@ -171,6 +171,11 @@ def generate_ontology():
         
         # 获取上传的文件
         uploaded_files = request.files.getlist('files')
+        
+        # logger.debug(f"接收到的文件: {request.files}")
+        # for key in request.files:
+        #     files_list = request.files.getlist(key)
+        #     logger.debug(f"  {key}: {[f.filename for f in files_list]}")
         if not uploaded_files or all(not f.filename for f in uploaded_files):
             return jsonify({
                 "success": False,
@@ -436,18 +441,21 @@ def build_graph():
                         progress=progress
                     )
                 
-                from app.services.graphiti_adapter import _get_graphiti, _run, _neo4j_query
-                try:
-                    g = _get_graphiti()
-                    ep_count = _run(_neo4j_query(g,
-                        'MATCH (e:Episodic {group_id: $gid}) RETURN count(e) AS n',
-                        {'gid': graph_id}
-                    ))
-                    already_done = int(ep_count[0]['n']) if ep_count else 0
-                except Exception:
-                    already_done = 0
+                # from app.services.graphiti_adapter import _get_graphiti, _run, _neo4j_query
+                # try:
+                #     g = _get_graphiti()
+                #     ep_count = _run(_neo4j_query(g,
+                #         'MATCH (e:Episodic {group_id: $gid}) RETURN count(e) AS n',
+                #         {'gid': graph_id}
+                #     ))
+                #     already_done = int(ep_count[0]['n']) if ep_count else 0
+                # except Exception:
+                #     already_done = 0
 
-                skip_chunks = already_done
+                # skip_chunks = already_done
+                # TOFIX: 暂不支持断点续传，后续可以根据实际情况增加
+                
+                skip_chunks = 0  
                 remaining = total_chunks - skip_chunks
                 msg_start = (f"断点续传：跳过 {skip_chunks} 个已处理块，继续处理 {remaining} 块..."
                              if skip_chunks > 0 else f"开始添加 {total_chunks} 个文本块...")

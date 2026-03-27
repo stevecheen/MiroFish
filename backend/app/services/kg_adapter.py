@@ -24,13 +24,18 @@ class KnowledgeGraphAdapter(ABC):
     """知识图谱适配器抽象基类"""
 
     @abstractmethod
-    def create_graph(self, graph_id: str, name: str = None) -> Any:
+    def create_graph(self, graph_id: str, name: str = None, description: str = None) -> Any:
         """创建图谱"""
         pass
 
     @abstractmethod
     def add_episode(self, graph_id: str, text: str, **kwargs) -> Any:
         """添加单条内容"""
+        pass
+
+    @abstractmethod
+    def count_episodes(self, graph_id: str) -> int:
+        """统计 episode 数量"""
         pass
 
     @abstractmethod
@@ -95,7 +100,7 @@ class ZepCloudAdapter(KnowledgeGraphAdapter):
         self.client = Zep(api_key=self.api_key)
         logger.info("ZepCloudAdapter 初始化完成")
 
-    def create_graph(self, graph_id: str, name: str = None) -> Any:
+    def create_graph(self, graph_id: str, name: str = None, description: str = None) -> Any:
         return self.client.graph.create(graph_id=graph_id, name=name or graph_id)
 
     def add_episode(self, graph_id: str, text: str, **kwargs) -> Any:
@@ -108,6 +113,10 @@ class ZepCloudAdapter(KnowledgeGraphAdapter):
 
     def get_episode(self, episode_uuid: str) -> Any:
         return self.client.graph.episode.get(uuid_=episode_uuid)
+
+    def count_episodes(self, graph_id: str) -> int:
+        episodes = self.client.graph.episode.get_by_graph_id(graph_id=graph_id)
+        return episodes.total if episodes else 0
 
     def search(self, graph_id: str, query: str, limit: int = 10, scope: str = "all", reranker: str = None):
         """搜索图谱
@@ -324,7 +333,7 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
             self._graph_id_to_group[graph_id] = graph_id
         return self._graph_id_to_group[graph_id]
 
-    def create_graph(self, graph_id: str, name: str = None) -> Any:
+    def create_graph(self, graph_id: str, name: str = None, description: str = None) -> Any:
         # Graphiti 不需要预创建图，通过 group 区分
         self._graph_id_to_group[graph_id] = graph_id
 
@@ -441,6 +450,19 @@ class GraphitiAdapter(KnowledgeGraphAdapter):
                 return data
             logger.warning(f"[get_episode] uuid={episode_uuid}, 未找到 episode")
             return None
+
+    def count_episodes(self, graph_id: str) -> int:
+        """统计 episode 数量，使用同步驱动"""
+        with self._sync_driver.session() as session:
+            query = """
+            MATCH (e:Episodic {group_id: $group_id})
+            RETURN count(e) AS count
+            """
+            result = session.run(query, group_id=self._get_group(graph_id))
+            record = result.single()
+            count = record["count"] if record else 0
+            logger.debug(f"[count_episodes] graph_id={graph_id}, count={count}")
+            return count
 
     def search(self, graph_id: str, query: str, limit: int = 10, scope: str = "all", reranker: str = None):
         logger.info(f"[GraphitiAdapter.search] 调用")

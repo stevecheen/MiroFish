@@ -11,6 +11,8 @@ import threading
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 
+from zep_cloud import EpisodeData, EntityEdgeSourceTarget
+from zep_cloud.external_clients.ontology import EntityModel, EntityText, EdgeModel
 from ..config import Config
 from ..models.task import TaskManager, TaskStatus
 from .kg_adapter import get_knowledge_graph_adapter
