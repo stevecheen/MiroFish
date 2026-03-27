@@ -61,7 +61,22 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
-        response = self.client.chat.completions.create(**kwargs)
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+        except Exception as e:
+            # 如果是因为 response_format 导致的错误，尝试不使用 response_format 重试
+            error_str = str(e).lower()
+            if response_format and ("response_format" in error_str or 
+                                    "json_object" in error_str or
+                                    "unsupported" in error_str or
+                                    "400" in error_str or
+                                    "500" in error_str):
+                # 移除 response_format 后重试
+                kwargs.pop("response_format", None)
+                response = self.client.chat.completions.create(**kwargs)
+            else:
+                raise
+        
         content = response.choices[0].message.content
         # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
@@ -84,12 +99,31 @@ class LLMClient:
         Returns:
             解析后的JSON对象
         """
-        response = self.chat(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"}
-        )
+        try:
+            # 首先尝试使用 response_format 参数（OpenAI 原生支持）
+            response = self.chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"}
+            )
+        except Exception as e:
+            # 如果失败，尝试不使用 response_format 重试
+            error_str = str(e).lower()
+            if ("response_format" in error_str or 
+                "json_object" in error_str or
+                "unsupported" in error_str or
+                "400" in error_str or
+                "500" in error_str):
+                # 不使用 response_format，依赖系统提示词中的 JSON 格式要求
+                response = self.chat(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+            else:
+                raise
+        
         # 清理markdown代码块标记
         cleaned_response = response.strip()
         cleaned_response = re.sub(r'^```(?:json)?\s*\n?', '', cleaned_response, flags=re.IGNORECASE)
@@ -100,4 +134,3 @@ class LLMClient:
             return json.loads(cleaned_response)
         except json.JSONDecodeError:
             raise ValueError(f"LLM返回的JSON格式无效: {cleaned_response}")
-

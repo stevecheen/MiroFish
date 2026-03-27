@@ -526,16 +526,32 @@ class OasisProfileGenerator:
         
         for attempt in range(max_attempts):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[
+                kwargs = {
+                    "model": self.model_name,
+                    "messages": [
                         {"role": "system", "content": self._get_system_prompt(is_individual)},
                         {"role": "user", "content": prompt}
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0.7 - (attempt * 0.1)  # 每次重试降低温度
+                    "temperature": 0.7 - (attempt * 0.1)  # 每次重试降低温度
                     # 不设置max_tokens，让LLM自由发挥
-                )
+                }
+                
+                # 尝试使用 response_format，如果不支持则回退
+                try:
+                    kwargs["response_format"] = {"type": "json_object"}
+                    response = self.client.chat.completions.create(**kwargs)
+                except Exception as api_error:
+                    error_str = str(api_error).lower()
+                    if ("response_format" in error_str or 
+                        "json_object" in error_str or
+                        "unsupported" in error_str or
+                        "400" in error_str or
+                        "500" in error_str):
+                        # 移除 response_format 后重试
+                        kwargs.pop("response_format", None)
+                        response = self.client.chat.completions.create(**kwargs)
+                    else:
+                        raise
                 
                 content = response.choices[0].message.content
                 
