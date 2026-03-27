@@ -11,6 +11,7 @@ warnings.filterwarnings("ignore", message=".*resource_tracker.*")
 
 from flask import Flask, request
 from flask_cors import CORS
+from flask_caching import Cache
 
 from .config import Config
 from .utils.logger import setup_logger, get_logger
@@ -20,7 +21,15 @@ def create_app(config_class=Config):
     """Flask应用工厂函数"""
     app = Flask(__name__)
     app.config.from_object(config_class)
-    
+
+    # 配置缓存
+    cache_config = {
+        'CACHE_TYPE': 'SimpleCache',  # 生产环境可改为 Redis
+        'CACHE_DEFAULT_TIMEOUT': 300,  # 默认 5 分钟缓存
+    }
+    cache = Cache(app, config=cache_config)
+    app.cache = cache  # 挂载到 app 上方便其他地方使用
+
     # 设置JSON编码：确保中文直接显示（而不是 \uXXXX 格式）
     # Flask >= 2.3 使用 app.json.ensure_ascii，旧版本使用 JSON_AS_ASCII 配置
     if hasattr(app, 'json') and hasattr(app.json, 'ensure_ascii'):
@@ -73,8 +82,37 @@ def create_app(config_class=Config):
     def health():
         return {'status': 'ok', 'service': 'MiroFish Backend'}
     
+    # On startup: recover any projects stuck in graph_building (task was killed by restart)
+    # TOFIX: 这里的恢复逻辑比较简单，依赖于 Neo4j 中是否有数据。理想情况下应该有更可靠的方式来判断任务是否真的完成（比如检查构建日志或使用更细粒度的状态）。但这个简单的检查至少可以避免大多数重启后卡在 graph_building 的情况。
+    # if should_log_startup:
+    #     _recover_stuck_projects()
+
     if should_log_startup:
         logger.info("MiroFish Backend 启动完成")
-    
+
     return app
+
+
+def _recover_stuck_projects():
+    """Mark graph_building projects as completed if Neo4j already has their data."""
+    from .models.project import ProjectManager, ProjectStatus
+    from .utils.logger import get_logger as _get_logger
+    _log = _get_logger('mirofish.startup')
+    try:
+        for p in ProjectManager.list_projects():
+            if p.status == ProjectStatus.GRAPH_BUILDING and p.graph_id:
+                from .services.graphiti_adapter import _get_graphiti, _run, _neo4j_query
+                g = _get_graphiti()
+                r = _run(_neo4j_query(g,
+                    'MATCH (n:Entity {group_id: $gid}) RETURN count(n) AS n',
+                    {'gid': p.graph_id}
+                ))
+                node_count = int(r[0]['n']) if r else 0
+                if node_count > 0:
+                    p.status = ProjectStatus.GRAPH_COMPLETED
+                    p.graph_build_task_id = None
+                    ProjectManager.save_project(p)
+                    _log.info(f"Recovered stuck project {p.project_id}: {node_count} nodes found, marked graph_completed")
+    except Exception as e:
+        _get_logger('mirofish.startup').warning(f"Startup recovery failed: {e}")
 

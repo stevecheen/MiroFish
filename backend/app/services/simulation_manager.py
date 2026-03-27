@@ -526,3 +526,36 @@ class SimulationManager:
                 f"   - 并行运行双平台: python {scripts_dir}/run_parallel_simulation.py --config {config_path}"
             )
         }
+
+    def delete_simulation(self, simulation_id: str) -> bool:
+        """
+        删除模拟及其所有相关数据
+
+        Args:
+            simulation_id: 模拟ID
+
+        Returns:
+            删除是否成功
+        """
+        import shutil
+
+        sim_dir = self._get_simulation_dir(simulation_id)
+
+        # 检查模拟目录是否存在
+        if not os.path.exists(sim_dir):
+            logger.warning(f"模拟目录不存在，跳过删除: {simulation_id}")
+            return False
+
+        try:
+            # 删除模拟目录
+            shutil.rmtree(sim_dir)
+
+            # 从内存缓存中移除
+            if simulation_id in self._simulations:
+                del self._simulations[simulation_id]
+
+            logger.info(f"成功删除模拟: {simulation_id}")
+            return True
+        except Exception as e:
+            logger.error(f"删除模拟失败: {simulation_id}, 错误: {e}")
+            return False
